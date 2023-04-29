@@ -12,11 +12,11 @@ from typing import Dict
 from typing import Tuple
 
 # Set to enable print logging of cache hits/misses/clears
-NO_DEBUG, DEBUG_GET, DEBUG_CLEAR, DEBUG_SET = 0, 1, 2, 4
+NO_DEBUG, DEBUG_GET, DEBUG_CLEAR, DEBUG_SET, DEBUG_ALL = 0, 1, 2, 4, 7
 # combine the flags with | operator
 debug = NO_DEBUG
 # debug_name can be used to filter cache results by a given name
-debug_name = "regs"
+debug_name = ""
 
 
 class DebugCacheDict(UserDict):
@@ -26,6 +26,7 @@ class DebugCacheDict(UserDict):
         self.misses = 0
         self.func = func
         self.name = f'{func.__module__.split(".")[-1]}.{func.__name__}'
+        # self.missed = []
 
     def __getitem__(self, key):
         if debug & DEBUG_GET and (not debug_name or debug_name in self.name):
@@ -36,6 +37,7 @@ class DebugCacheDict(UserDict):
             return value
         except KeyError:
             self.misses += 1
+            # self.missed.append(key)
             raise
 
     def __setitem__(self, key, value):
@@ -46,9 +48,39 @@ class DebugCacheDict(UserDict):
     def clear(self):
         if debug & DEBUG_CLEAR and (not debug_name or debug_name in self.name):
             print(f"CLEAR {self.name} (hits: {self.hits}, misses: {self.misses})")
+            # print("Missed keys:")
+            # for key in self.missed:
+            #    print(f"- {key}")
         self.data.clear()
         self.hits = 0
         self.misses = 0
+
+
+class DebugSingleValCache:
+    def __init__(self, func):
+        self._cached_value = _NOT_FOUND_IN_CACHE
+        self.name = f"{func.__module__.split('.')[-1]}.{func.__name__}"
+        self.hits = 0
+
+    def clear(self):
+        if debug & DEBUG_CLEAR and (not debug_name or debug_name in self.name):
+            print(f"SVC CLEAR {self.name} (hits: {self.hits})")
+        self._cached_value = _NOT_FOUND_IN_CACHE
+        self.hits = 0
+
+    @property
+    def cached_value(self):
+        if debug & DEBUG_GET and (not debug_name or debug_name in self.name):
+            print(f"SVC GET {self.name}: {self._cached_value}")
+        self.hits += 1
+        return self._cached_value
+
+    @cached_value.setter
+    def cached_value(self, value):
+        if debug & DEBUG_SET and (not debug_name or debug_name in self.name):
+            print(f"SVC SET {self.name}: {value}")
+        self.hits = 0
+        self._cached_value = value
 
 
 class _CacheUntilEvent:
@@ -101,6 +133,16 @@ _KWARGS_SEPARATOR = object()
 IS_CACHING = True
 
 
+class SingleValCache:
+    __slots__ = ("cached_value",)
+
+    def __init__(self):
+        self.cached_value = _NOT_FOUND_IN_CACHE
+
+    def clear(self):
+        self.cached_value = _NOT_FOUND_IN_CACHE
+
+
 def cache_until(*event_names) -> Callable:
     if any(event_name not in _ALL_CACHE_EVENT_NAMES for event_name in event_names):
         raise ValueError(
@@ -115,32 +157,55 @@ def cache_until(*event_names) -> Callable:
                 "Pass multiple event names to the `cache_until` decorator."
             )
 
-        cache: Dict[Tuple[Any], Any] = {} if not debug else DebugCacheDict(func)
+        if len(func.__code__.co_varnames) > 0:
+            cache: Dict[Tuple[Any], Any] = {} if not debug else DebugCacheDict(func)
 
-        @wraps(func)
-        def decorator(*a, **kw):
-            if IS_CACHING:
-                key: Tuple[Any] = (a, _KWARGS_SEPARATOR, *kw.items())
+            @wraps(func)
+            def decorator(*a, **kw):
+                if IS_CACHING:
+                    key: Tuple[Any] = (a, _KWARGS_SEPARATOR, *kw.items())
 
-                # Check if the value is in the cache; if we have a cache miss,
-                # we return a special singleton object `_NOT_FOUND_IN_CACHE`. This way
-                # we can also cache a result of 'None' from a function
-                value = cache.get(key, _NOT_FOUND_IN_CACHE)
-                if value is not _NOT_FOUND_IN_CACHE:
+                    # Check if the value is in the cache; if we have a cache miss,
+                    # we return a special singleton object `_NOT_FOUND_IN_CACHE`. This way
+                    # we can also cache a result of 'None' from a function
+                    value = cache.get(key, _NOT_FOUND_IN_CACHE)
+                    if value is not _NOT_FOUND_IN_CACHE:
+                        return value
+
+                    value = func(*a, **kw)
+
+                    # Sanity check: its not perfect and won't cover all cases like ([],)
+                    # but it should be good enough
+                    if isinstance(value, list):
+                        print(f"Should not cache mutable types! {func.__name__}")
+
+                    cache[key] = value
+
                     return value
 
-                value = func(*a, **kw)
+                return func(*a, **kw)
 
-                # Sanity check: its not perfect and won't cover all cases like ([],)
-                # but it should be good enough
-                if isinstance(value, list):
-                    print(f"Should not cache mutable types! {func.__name__}")
+        else:
+            cache = SingleValCache() if not debug else DebugSingleValCache(func)
 
-                cache[key] = value
+            @wraps(func)
+            def decorator():
+                if IS_CACHING:
+                    value = cache.cached_value
+                    if value is not _NOT_FOUND_IN_CACHE:
+                        return value
 
-                return value
+                    value = func()
 
-            return func(*a, **kw)
+                    # Sanity check: its not perfect and won't cover all cases like ([],)
+                    # but it should be good enough
+                    if isinstance(value, list):
+                        print(f"Should not cache mutable types! {func.__name__}")
+
+                    cache.cached_value = value
+                    return value
+
+                return func()
 
         # Set the cache on the function so it can be cleared on demand
         # this may be useful for tests

@@ -66,3 +66,34 @@ Out[8]: 0.03724928366762187
 
 We got around 20% speed up when we spam `context+clear_caches` and around 3% speed up when we only do `context` in a loop.
 
+
+### Benchmark 3
+
+Benchmark 3 was made between versions:
+* New: 0ff83be - `lib/cache.py: add single value cache (1 second ago) <disconnect3d>`
+* Old: 0e0a293 - (origin/dev, origin/HEAD) `New lib/cache.py: make caching great again (#1671) (7 hours ago) <Disconnect3d>`
+
+Benchmark code was:
+
+```py
+import pwndbg
+
+
+@pwndbg.lib.cache.cache_until("stop")
+def foo():
+    return 1
+
+cache = foo.cache
+N = 5_000_000
+
+with open("results", "w") as f:
+    for i in range(5):
+        pwndbg.profiling.profiler.start()
+        for i in range(N):
+            foo()
+            cache.clear()
+        t = pwndbg.profiling.profiler.stop('profile.prof')
+        print(f"AVG: {t/N}")
+        f.write(f"{t}\n")
+```
+
